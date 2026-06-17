@@ -1,6 +1,6 @@
 """
-Rasm → Excel Telegram Bot
-Qo'llab-quvvatlanadigan formatlar: HEIC, JPG, JPEG, PNG, BMP, WEBP, TIFF
+Rasm → Excel Telegram Bot (yangilangan)
+Rasm Excel ichiga haqiqiy rasm sifatida joylashtiriladi
 """
 
 import os
@@ -14,10 +14,8 @@ from telegram.ext import (
 )
 from PIL import Image
 import openpyxl
-from openpyxl.styles import PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage
 
-# HEIC support (ixtiyoriy)
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
@@ -31,65 +29,67 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# .env yoki muhit o'zgaruvchisidan token olish
-# ─────────────────────────────────────────────
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8951279462:AAEDjR6dMqi0BFBt5sSuUxmIdczCSP31u90")
+TOKEN = "8951279462:AAEDjR6dMqi0BFBt5sSuUxmIdczCSP31u90"
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif"}
+MAX_FILE_SIZE = 20 * 1024 * 1024
 
-MAX_DIMENSION = 200          # Excel uchun max piksel o'lchami (resize)
-CELL_SIZE_PX  = 6            # Har bir katak necha pikselni ifodalaydi
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
-
-
-# ─────────────────────────────────────────────
-# Yordamchi funksiyalar
-# ─────────────────────────────────────────────
 
 def image_bytes_to_excel(img_bytes: bytes, filename: str = "image") -> bytes:
-    """PIL Image → piksel-art Excel fayli (in-memory)"""
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    """Rasmni Excel fayliga joylashtiradi (to'liq sifatda)"""
+    img = Image.open(io.BytesIO(img_bytes))
 
-    # Katta rasmlarni kichraytirish
-    w, h = img.size
-    if w > MAX_DIMENSION or h > MAX_DIMENSION:
-        ratio = min(MAX_DIMENSION / w, MAX_DIMENSION / h)
-        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    # RGBA → RGB
+    if img.mode in ("RGBA", "P", "LA"):
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
 
-    width, height = img.size
-    pixels = img.load()
+    orig_size = f"{img.width} × {img.height} px"
+
+    # Excel uchun max 1500px
+    max_dim = 1500
+    if img.width > max_dim or img.height > max_dim:
+        ratio = min(max_dim / img.width, max_dim / img.height)
+        img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.LANCZOS)
+
+    # PNG sifatida saqlash (siqilmagan)
+    png_buf = io.BytesIO()
+    img.save(png_buf, format="PNG", optimize=False)
+    png_buf.seek(0)
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Rasm"
 
-    # Katak o'lchamlarini sozlash
-    col_width  = CELL_SIZE_PX * 0.14   # openpyxl width units (taxminan)
-    row_height = CELL_SIZE_PX * 0.75   # points
+    xl_img = XLImage(png_buf)
+    xl_img.anchor = "B2"
+    ws.add_image(xl_img)
 
-    for col in range(1, width + 1):
-        ws.column_dimensions[get_column_letter(col)].width = col_width
+    # Kataklarni rasmga moslashtirish
+    col_count = max(img.width // 7 + 5, 20)
+    row_count = max(img.height // 20 + 5, 20)
+    for col in range(1, col_count):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 7
+    for row in range(1, row_count):
+        ws.row_dimensions[row].height = 20
 
-    for row in range(1, height + 1):
-        ws.row_dimensions[row].height = row_height
-
-    # Piksellarni rang sifatida yozish
-    for y in range(height):
-        for x in range(width):
-            r, g, b = pixels[x, y]
-            hex_color = f"{r:02X}{g:02X}{b:02X}"
-            cell = ws.cell(row=y + 1, column=x + 1)
-            cell.fill = PatternFill(fill_type="solid", fgColor=hex_color)
-
-    # Metadata varag'i
+    # Ma'lumot varag'i
     meta = wb.create_sheet("Ma'lumot")
-    meta["A1"] = "Fayl nomi"
-    meta["B1"] = filename
-    meta["A2"] = "O'lcham (px)"
-    meta["B2"] = f"{width} × {height}"
-    meta["A3"] = "Bot"
-    meta["B3"] = "Rasm→Excel Bot"
+    meta.column_dimensions["A"].width = 20
+    meta.column_dimensions["B"].width = 30
+    rows = [
+        ("Fayl nomi", filename),
+        ("Asl o'lcham", orig_size),
+        ("Excel o'lcham", f"{img.width} × {img.height} px"),
+        ("Format", "PNG (yuqori sifat)"),
+        ("Bot", "@Imagesdanexcelga_bot"),
+    ]
+    for i, (k, v) in enumerate(rows, 1):
+        meta.cell(row=i, column=1, value=k)
+        meta.cell(row=i, column=2, value=v)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -97,49 +97,30 @@ def image_bytes_to_excel(img_bytes: bytes, filename: str = "image") -> bytes:
     return buf.read()
 
 
-# ─────────────────────────────────────────────
-# Handler'lar
-# ─────────────────────────────────────────────
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    heic_note = "✅ HEIC/HEIF" if HEIC_SUPPORTED else "⚠️ HEIC (kutubxona o'rnatilmagan)"
+    heic = "✅ HEIC/HEIF" if HEIC_SUPPORTED else "⚠️ HEIC (kutubxona yo'q)"
     await update.message.reply_text(
         "👋 *Rasm → Excel Botga xush kelibsiz!*\n\n"
-        "Menga quyidagi formatdagi rasm yuboring:\n"
-        f"📷 JPG / JPEG\n📷 PNG\n📷 {heic_note}\n"
+        "Menga rasm yuboring:\n"
+        f"📷 JPG / JPEG / PNG\n📷 {heic}\n"
         "📷 BMP / WEBP / TIFF\n\n"
-        "Men uni *piksel-art Excel fayli* (.xlsx) sifatida qaytaraman!\n\n"
-        "📌 Rasm 200×200 pikselgacha siqiladi (sifat saqlanadi).",
-        parse_mode="Markdown"
-    )
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "ℹ️ *Yordam*\n\n"
-        "1️⃣ Rasmni bot chatiga yuboring (foto yoki fayl sifatida)\n"
-        "2️⃣ Bot rasmni qayta ishlaydi\n"
-        "3️⃣ Excel (.xlsx) fayli qaytariladi\n\n"
-        "⚡️ Katta rasmlar avtomatik kichraytiriladi.\n"
-        "📏 Maksimal fayl hajmi: 20 MB",
+        "Men uni *yuqori sifatda Excel fayliga* (.xlsx) joylashtiraman! ✨",
         parse_mode="Markdown"
     )
 
 
 async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Telegram foto (siqilgan) → Excel"""
     msg = await update.message.reply_text("⏳ Qayta ishlanmoqda...")
-    photo = update.message.photo[-1]  # Eng yuqori sifat
+    photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     img_bytes = await file.download_as_bytearray()
-
     try:
         excel_bytes = image_bytes_to_excel(bytes(img_bytes), "telegram_photo")
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=io.BytesIO(excel_bytes),
             filename="rasm.xlsx",
-            caption="✅ Tayyor! Excel faylini yuklab oling."
+            caption="✅ Tayyor! Excel faylini oching — rasm ichida bo'ladi."
         )
     except Exception as e:
         logger.error(f"Photo error: {e}")
@@ -149,25 +130,16 @@ async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fayl (HEIC, PNG, JPG va h.k.) → Excel"""
     doc: Document = update.message.document
     filename = doc.file_name or "file"
     ext = Path(filename).suffix.lower()
 
     if ext not in SUPPORTED_EXTENSIONS:
-        await update.message.reply_text(
-            f"⚠️ *{ext}* formati qo'llab-quvvatlanmaydi.\n"
-            "Iltimos JPG, PNG, HEIC, BMP, WEBP yoki TIFF yuboring.",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"⚠️ *{ext}* formati qo'llab-quvvatlanmaydi.", parse_mode="Markdown")
         return
 
     if not HEIC_SUPPORTED and ext in {".heic", ".heif"}:
-        await update.message.reply_text(
-            "⚠️ HEIC formati hozir mavjud emas.\n"
-            "Serverda `pillow-heif` kutubxonasi o'rnatilmagan.\n"
-            "Rasmni JPG yoki PNG formatiga o'tkazib yuboring."
-        )
+        await update.message.reply_text("⚠️ HEIC hozir mavjud emas. JPG yoki PNG yuboring.")
         return
 
     if doc.file_size and doc.file_size > MAX_FILE_SIZE:
@@ -175,13 +147,11 @@ async def process_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text(f"⏳ *{filename}* qayta ishlanmoqda...", parse_mode="Markdown")
-
     try:
         file = await context.bot.get_file(doc.file_id)
         img_bytes = await file.download_as_bytearray()
         excel_bytes = image_bytes_to_excel(bytes(img_bytes), Path(filename).stem)
         out_name = Path(filename).stem + ".xlsx"
-
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=io.BytesIO(excel_bytes),
@@ -196,18 +166,11 @@ async def process_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.delete()
 
 
-# ─────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────
-
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, process_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, process_document))
-
     logger.info("Bot ishga tushdi...")
     app.run_polling(drop_pending_updates=True)
 
